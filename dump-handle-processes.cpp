@@ -8,68 +8,54 @@
 #define PSAPI_VERSION 1
 #include <psapi.h>
 
-void PrintProcessNameAndID(DWORD processID)
+void PrintProcessNameAndID(DWORD process_id)
 {
-    TCHAR szProcessName[MAX_PATH] = TEXT("<unknown>");
+    TCHAR process_name[MAX_PATH] = TEXT("<unknown>");
 
-    // Get a handle to the process.
-
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION |
+    HANDLE process_handle = OpenProcess(PROCESS_QUERY_INFORMATION |
         PROCESS_VM_READ,
-        FALSE, processID);
+        FALSE, process_id);
 
-    // Get the process name.
-    if (NULL != hProcess) {
-        HMODULE hMod;
-        DWORD cbNeeded;
-
-        if (EnumProcessModules(hProcess, &hMod, sizeof(hMod), &cbNeeded)) {
-            GetModuleBaseName(hProcess, hMod, szProcessName,
-                sizeof(szProcessName) / sizeof(TCHAR));
-        }
+    if (NULL != process_handle) {
+        (void)GetModuleBaseName(process_handle, nullptr, process_name, sizeof(process_name) / sizeof(*process_name));
+        _tprintf(TEXT("%s  (PID: %u)\n"), process_name, process_id);
     }
-
-    // Print the process name and identifier.
-    _tprintf(TEXT("%s  (PID: %u)\n"), szProcessName, processID);
 
     // Release the handle to the process.
-    CloseHandle(hProcess);
+    CloseHandle(process_handle);
 }
 
-int main()
+int main(void)
 {
-    // Get the list of process identifiers.
-    DWORD aProcesses[1024], cbNeeded, cProcesses;
-    unsigned int i;
-    if (!EnumProcesses(aProcesses, sizeof(aProcesses), &cbNeeded)) {
-        return 1;
-    }
+    DWORD max_processes = 512;
+    DWORD bytes_used;
+    DWORD* processes = nullptr;
+    DWORD process_count;
 
-    // Calculate how many process identifiers were returned.
-    cProcesses = cbNeeded / sizeof(DWORD);
+    // Get the list of process identifiers.
+    do {
+        max_processes *= 2;
+        delete[] processes;
+        processes = new DWORD[max_processes];
+        if (!EnumProcesses(processes, max_processes * sizeof(DWORD), &bytes_used)) {
+            return 1;
+        }
+
+        // Calculate how many process identifiers were returned.
+        process_count = bytes_used / sizeof(DWORD);
+    } while (process_count == max_processes);
 
     // Print the name and process identifier for each process.
-    for (i = 0; i < cProcesses; i++) {
-        if (aProcesses[i] != 0) {
-            PrintProcessNameAndID(aProcesses[i]);
+    for (DWORD i = 0; i < process_count; i++) {
+        if (processes[i] != 0) {
+            PrintProcessNameAndID(processes[i]);
         }
     }
 
+    delete[] processes;
     return 0;
 
-/* Take snapshot of process list.
-        Take snapshot of each process.
-        For each handle, query eBPF for its type info.
-        */
+/* Take snapshot of each process.
+   For each handle, query eBPF for its type info.
+ */
 }
-
-// Run program: Ctrl + F5 or Debug > Start Without Debugging menu
-// Debug program: F5 or Debug > Start Debugging menu
-
-// Tips for Getting Started: 
-//   1. Use the Solution Explorer window to add/manage files
-//   2. Use the Team Explorer window to connect to source control
-//   3. Use the Output window to see build output and other messages
-//   4. Use the Error List window to view errors
-//   5. Go to Project > Add New Item to create new code files, or Project > Add Existing Item to add existing code files to the project
-//   6. In the future, to open this project again, go to File > Open > Project and select the .sln file
