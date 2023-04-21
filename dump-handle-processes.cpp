@@ -26,7 +26,7 @@ typedef struct
 typedef struct
 {
     ULONG Count;
-    SYSTEM_HANDLE Handles[0];
+    SYSTEM_HANDLE Handles[1];
 } SYSTEM_HANDLE_INFORMATION;
 
 typedef enum
@@ -67,13 +67,8 @@ typedef struct
     char more[16];
 } OBJECT_TYPE_INFORMATION;
 
-void PrintProcessHandles(HANDLE process_handle)
+void PrintSystemHandles(void)
 {
-    DWORD handle_count;
-    if (!GetProcessHandleCount(process_handle, &handle_count)) {
-        return;
-    }
-
     size_t shsize = sizeof(SYSTEM_HANDLE);
     ULONG bytes_needed = 0;
     ULONG handle_information_size = 32;
@@ -83,28 +78,77 @@ void PrintProcessHandles(HANDLE process_handle)
         free(handle_information);
         handle_information_size = bytes_needed;
         handle_information = (SYSTEM_HANDLE_INFORMATION*)malloc(handle_information_size);
+        if (handle_information == nullptr) {
+            printf("Out of memory\n");
+            return;
+        }
         status = NtQuerySystemInformation(SystemHandleInformation, handle_information, handle_information_size, &bytes_needed);
-        if (NT_ERROR(status)) {
+        if (NT_SUCCESS(status)) {
             for (ULONG i = 0; i < handle_information->Count; i++) {
-                printf("PID %d: handle %x\n", handle_information->Handles[i].ProcessId, handle_information->Handles[i].Handle);
-                printf("  type: %d\n", handle_information->Handles[i].ObjectTypeNumber);
+                SYSTEM_HANDLE* system_handle = &handle_information->Handles[i];
+#if 1 // DEBUG
+                if (system_handle->ProcessId != 4432) {
+                    continue;
+                }
+#endif
+                HANDLE process_handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_DUP_HANDLE |
+                    PROCESS_VM_READ,
+                    FALSE, system_handle->ProcessId);
+                if (process_handle == nullptr) {
+                    continue;
+                }
+
+                HANDLE target_handle;
+                if (!DuplicateHandle(
+                    process_handle,
+                    (HANDLE)system_handle->Handle,
+                    GetCurrentProcess(),
+                    &target_handle,
+                    0,
+                    FALSE,
+                    DUPLICATE_SAME_ACCESS)) {
+                    printf("DuplicateHandle failed with error %d\n", GetLastError());
+                    CloseHandle(process_handle);
+                    continue;
+                }
+
+                printf("PID %u: handle %p\n", system_handle->ProcessId, target_handle);
+                printf("  type: %d\n", system_handle->ObjectTypeNumber);
 
                 /* Query the object type. */
-                OBJECT_TYPE_INFORMATION object_type_info;
-                status = NtQueryObject((HANDLE)handle_information->Handles[i].Handle, ObjectTypeInformation, &object_type_info, sizeof(object_type_info), &bytes_needed);
+                PUBLIC_OBJECT_TYPE_INFORMATION object_type_info;
+                status = NtQueryObject(target_handle, ObjectTypeInformation, &object_type_info, sizeof(object_type_info), &bytes_needed);
                 if (NT_ERROR(status)) {
                     printf("  Name: <unknown>\n");
                 } else {
-                    printf("  Name: %ls\n", object_type_info.Name.Buffer);
+                    printf("  Name: %ls\n", object_type_info.TypeName.Buffer);
+                }
+
+                // Query the object basic info.
+                PUBLIC_OBJECT_BASIC_INFORMATION object_basic_info;
+                status = NtQueryObject(target_handle, ObjectBasicInformation, &object_basic_info, sizeof(object_basic_info), &bytes_needed);
+                if (NT_ERROR(status)) {
+                    printf("  HandleCount: <unknown>\n");
+                } else {
+                    printf("  HandleCount: %u\n", object_basic_info.HandleCount);
                 }
 
                 /* Query eBPF for its type info. */
                 // We could use the QUERY_PROGRAM_INFO ioctl to get this. Or we could move this logic into kernel mode
                 // and avoid all the user-kernel transitions, which seems better.
+
+                CloseHandle(process_handle);
             }
-            return;
         }
         free(handle_information);
+    }
+}
+
+void PrintProcessHandles(HANDLE process_handle)
+{
+    DWORD handle_count;
+    if (!GetProcessHandleCount(process_handle, &handle_count)) {
+        return;
     }
 
 #if 0
@@ -117,14 +161,16 @@ void PrintProcessHandles(HANDLE process_handle)
     //  PSS_CAPTURE_HANDLE_BASIC_INFORMATION
     //  PSS_CAPTURE_HANDLE_NAME_INFORMATION
     //  PSS_CAPTURE_THREADS
-    PSS_CAPTURE_FLAGS capture_flags = PSS_CAPTURE_THREADS;
+    PSS_CAPTURE_FLAGS capture_flags = PSS_CAPTURE_HANDLES | PSS_CAPTURE_HANDLE_NAME_INFORMATION | PSS_CAPTURE_HANDLE_TYPE_SPECIFIC_INFORMATION;
     DWORD result = PssCaptureSnapshot(process_handle, capture_flags, 0, &snapshot_handle);
     if (result != ERROR_SUCCESS) {
         printf("Error %d\n", result);
         return;
     }
+
     PSS_PROCESS_INFORMATION process_information;
     result = PssQuerySnapshot(snapshot_handle, PSS_QUERY_PROCESS_INFORMATION, &process_information, sizeof(process_information));
+
     PSS_HANDLE_INFORMATION pss_handle_information;
     result = PssQuerySnapshot(snapshot_handle, PSS_QUERY_HANDLE_INFORMATION, &pss_handle_information, sizeof(pss_handle_information));
 
@@ -149,9 +195,7 @@ void PrintProcessNameAndID(DWORD process_id)
 {
     TCHAR process_name[MAX_PATH] = TEXT("<unknown>");
 
-    HANDLE process_handle = OpenProcess(PROCESS_QUERY_INFORMATION |
-        PROCESS_VM_READ,
-        FALSE, process_id);
+    HANDLE process_handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, process_id);
 
     if (process_handle == nullptr) {
         return;
@@ -159,14 +203,17 @@ void PrintProcessNameAndID(DWORD process_id)
 
     (void)GetModuleBaseName(process_handle, nullptr, process_name, sizeof(process_name) / sizeof(*process_name));
     _tprintf(TEXT("%s  (PID: %u)\n"), process_name, process_id);
-
-    PrintProcessHandles(process_handle);
+    if (process_id == 4432) {
+        PrintProcessHandles(process_handle);
+    }
 
     CloseHandle(process_handle);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    //PrintSystemHandles();
+
     DWORD max_processes = 512;
     DWORD bytes_used;
     DWORD* processes = nullptr;
