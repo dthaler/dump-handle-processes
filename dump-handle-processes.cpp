@@ -67,6 +67,76 @@ typedef struct
     char more[16];
 } OBJECT_TYPE_INFORMATION;
 
+void PrintHandleInfo(HANDLE process_handle, HANDLE other_handle)
+{
+    char buffer[1024];
+    ULONG buffer_size = sizeof(buffer);
+    ULONG bytes_needed;
+    NTSTATUS status;
+
+    printf(" Handle: %p\n", other_handle);
+
+    HANDLE target_handle;
+    if (!DuplicateHandle(
+        process_handle,
+        other_handle,
+        GetCurrentProcess(),
+        &target_handle,
+        0,
+        FALSE,
+        DUPLICATE_SAME_ACCESS)) {
+        printf("DuplicateHandle failed with error %d\n", GetLastError());
+        return;
+    }
+
+#if 0
+    // Query the object basic info.
+    PUBLIC_OBJECT_BASIC_INFORMATION* object_basic_info = (PUBLIC_OBJECT_BASIC_INFORMATION*)buffer;
+    bytes_needed = 0;
+    status = NtQueryObject(target_handle, ObjectBasicInformation, object_basic_info, buffer_size, &bytes_needed);
+    if (status == STATUS_INFO_LENGTH_MISMATCH) {
+        printf("  Length needed to get HandleCount: %d\n", bytes_needed);
+    }
+    if (NT_ERROR(status)) {
+        printf("  HandleCount: <unknown>\n");
+    }
+    else {
+        printf("  HandleCount: %u\n", object_basic_info->HandleCount);
+    }
+#endif
+
+    /* Query the object type. */
+    PUBLIC_OBJECT_TYPE_INFORMATION* object_type_info = (PUBLIC_OBJECT_TYPE_INFORMATION*)buffer;
+    bytes_needed = 0;
+    status = NtQueryObject(target_handle, ObjectTypeInformation, object_type_info, buffer_size, &bytes_needed);
+    if (status == STATUS_INFO_LENGTH_MISMATCH) {
+        printf("  Length needed to get TypeName: %d\n", bytes_needed);
+    }
+    if (NT_ERROR(status)) {
+        printf("  TypeName: <unknown>\n");
+    } else {
+        printf("  TypeName: %ls\n", object_type_info->TypeName.Buffer);
+
+        if (wcscmp(object_type_info->TypeName.Buffer, L"File") == 0) {
+            // Get name of file from file handle.
+            FILE_NAME_INFO* fni = (FILE_NAME_INFO*)buffer;
+            if (!GetFileInformationByHandleEx(target_handle, FileNameInfo, fni, buffer_size)) {
+                ULONG error = GetLastError();
+                printf("  Name: <HResult %x>\n", HRESULT_FROM_WIN32(error));
+            }
+            else {
+                WCHAR path[MAX_PATH];
+                memcpy(path, fni->FileName, fni->FileNameLength);
+                path[fni->FileNameLength / sizeof(WCHAR)] = 0;
+                printf("  Name: %ls\n", path);
+            }
+        }
+    }
+
+    printf("\n");
+    CloseHandle(target_handle);
+}
+
 void PrintSystemHandles(void)
 {
     size_t shsize = sizeof(SYSTEM_HANDLE);
@@ -98,10 +168,12 @@ void PrintSystemHandles(void)
                     continue;
                 }
 
+                HANDLE other_handle = (HANDLE)system_handle->Handle;
+#if 0
                 HANDLE target_handle;
                 if (!DuplicateHandle(
                     process_handle,
-                    (HANDLE)system_handle->Handle,
+                    other_handle,
                     GetCurrentProcess(),
                     &target_handle,
                     0,
@@ -111,27 +183,13 @@ void PrintSystemHandles(void)
                     CloseHandle(process_handle);
                     continue;
                 }
+#endif
 
-                printf("PID %u: handle %p\n", system_handle->ProcessId, target_handle);
+                printf("PID %u: handle %p\n", system_handle->ProcessId, other_handle);
                 printf("  type: %d\n", system_handle->ObjectTypeNumber);
 
-                /* Query the object type. */
-                PUBLIC_OBJECT_TYPE_INFORMATION object_type_info;
-                status = NtQueryObject(target_handle, ObjectTypeInformation, &object_type_info, sizeof(object_type_info), &bytes_needed);
-                if (NT_ERROR(status)) {
-                    printf("  Name: <unknown>\n");
-                } else {
-                    printf("  Name: %ls\n", object_type_info.TypeName.Buffer);
-                }
+                PrintHandleInfo(process_handle, other_handle);
 
-                // Query the object basic info.
-                PUBLIC_OBJECT_BASIC_INFORMATION object_basic_info;
-                status = NtQueryObject(target_handle, ObjectBasicInformation, &object_basic_info, sizeof(object_basic_info), &bytes_needed);
-                if (NT_ERROR(status)) {
-                    printf("  HandleCount: <unknown>\n");
-                } else {
-                    printf("  HandleCount: %u\n", object_basic_info.HandleCount);
-                }
 
                 /* Query eBPF for its type info. */
                 // We could use the QUERY_PROGRAM_INFO ioctl to get this. Or we could move this logic into kernel mode
@@ -183,7 +241,7 @@ void PrintProcessHandles(HANDLE process_handle)
             if (result != ERROR_SUCCESS) {
                 break;
             }
-            printf("  Handle: %p\n", handle_entry.Handle);
+            PrintHandleInfo(process_handle, handle_entry.Handle);
         }
 
         PssWalkMarkerFree(walk_marker_handle);
@@ -203,15 +261,20 @@ void PrintProcessNameAndID(DWORD process_id)
 
     (void)GetModuleBaseName(process_handle, nullptr, process_name, sizeof(process_name) / sizeof(*process_name));
     _tprintf(TEXT("%s  (PID: %u)\n"), process_name, process_id);
-    if (process_id == 4432) {
-        PrintProcessHandles(process_handle);
-    }
+
+    PrintProcessHandles(process_handle);
 
     CloseHandle(process_handle);
 }
 
 int main(int argc, char **argv)
 {
+    ULONG process_id = 0;
+    if (argc > 1) {
+        process_id = atoi(argv[1]);
+        PrintProcessNameAndID(process_id);
+        return 0;
+    }
     //PrintSystemHandles();
 
     DWORD max_processes = 512;
