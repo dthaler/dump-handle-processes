@@ -20,18 +20,6 @@ typedef struct {
     WCHAR                   NameBuffer[1];
 } OBJECT_NAME_INFORMATION;
 
-/* ebpfcore handles should be File with path one of :
-* #define EBPF_DEVICE_NAME L"\\Device\\EbpfIoDevice"
-#define EBPF_SYMBOLIC_DEVICE_NAME L"\\GLOBAL??\\EbpfIoDevice"
-*/
-#define EBPF_DEVICE_WIN32_NAME L"\\\\.\\EbpfIoDevice"
-HANDLE ebpf_device_handle = INVALID_HANDLE_VALUE;
-HANDLE initialize_device_handle()
-{
-    return CreateFile(
-        EBPF_DEVICE_WIN32_NAME, GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_FLAG_OVERLAPPED, 0);
-}
-
 typedef struct
 {
     ULONG ProcessId;
@@ -57,111 +45,13 @@ void PrintLocalHandleInfo(HANDLE target_handle)
 
     DWORD type = GetFileType(target_handle);
     if (type == FILE_TYPE_CHAR) {
-        printf(" Device Handle: %p\n", target_handle);
-    }
-    else if (type == FILE_TYPE_DISK) {
-        printf(" File Handle: %p\n", target_handle);
-    }
-    else {
-        printf(" Handle: %p\n", target_handle);
+        printf(" Device: ");
+    } else if (type == FILE_TYPE_DISK) {
+        printf(" File: ");
+    } else {
+        printf(" Other: ");
     }
 
-#if 0
-    WCHAR* path = (WCHAR*)buffer;
-    ULONG path_length = sizeof(buffer) / sizeof(*path);
-    ULONG length_needed = GetFinalPathNameByHandleW(target_handle, path, path_length, 0);
-    if (length_needed > 0 && length_needed <= path_length) {
-        printf(" Path: %ls\n", path);
-    }
-    else {
-        // Create a file mapping object.
-        HANDLE hFileMap = CreateFileMapping(target_handle, NULL, PAGE_READONLY, 0, 1, NULL);
-        if (hFileMap) {
-            // Create a file mapping to get the file name.
-            void* pMem = MapViewOfFile(hFileMap, FILE_MAP_READ, 0, 0, 1);
-
-            if (pMem)
-            {
-                BOOL bSuccess = FALSE;
-                TCHAR pszFilename[MAX_PATH + 1];
-                if (GetMappedFileName(GetCurrentProcess(), pMem, pszFilename, MAX_PATH))
-                {
-
-                    // Translate path with device name to drive letters.
-#define BUFSIZE 512
-                    TCHAR szTemp[BUFSIZE];
-                    szTemp[0] = '\0';
-
-                    if (GetLogicalDriveStrings(BUFSIZE - 1, szTemp))
-                    {
-                        TCHAR szName[MAX_PATH];
-                        TCHAR szDrive[3] = TEXT(" :");
-                        BOOL bFound = FALSE;
-                        TCHAR* p = szTemp;
-
-                        do
-                        {
-                            // Copy the drive letter to the template string
-                            *szDrive = *p;
-
-                            // Look up each device name
-                            if (QueryDosDevice(szDrive, szName, MAX_PATH))
-                            {
-                                size_t uNameLen = _tcslen(szName);
-
-                                if (uNameLen < MAX_PATH)
-                                {
-                                    bFound = _tcsnicmp(pszFilename, szName, uNameLen) == 0
-                                        && *(pszFilename + uNameLen) == _T('\\');
-
-                                    if (bFound)
-                                    {
-                                        // Reconstruct pszFilename using szTempFile
-                                        // Replace device path with DOS path
-                                        TCHAR szTempFile[MAX_PATH];
-                                        StringCchPrintf(szTempFile,
-                                            MAX_PATH,
-                                            TEXT("%s%s"),
-                                            szDrive,
-                                            pszFilename + uNameLen);
-                                        StringCchCopyN(pszFilename, MAX_PATH + 1, szTempFile, _tcslen(szTempFile));
-                                    }
-                                }
-                            }
-
-                            // Go to the next NULL character.
-                            while (*p++);
-                        } while (!bFound && *p); // end of string
-                    }
-                }
-                bSuccess = TRUE;
-                UnmapViewOfFile(pMem);
-            }
-            CloseHandle(hFileMap);
-        }
-    }
-
-    BY_HANDLE_FILE_INFORMATION by_handle_file_info;
-    if (!GetFileInformationByHandle(target_handle, &by_handle_file_info)) {
-        printf("Error %d\n", GetLastError());
-    }
-#endif
-
-#if 0
-    // Query the object basic info.
-    PUBLIC_OBJECT_BASIC_INFORMATION* object_basic_info = (PUBLIC_OBJECT_BASIC_INFORMATION*)buffer;
-    bytes_needed = 0;
-    status = NtQueryObject(target_handle, ObjectBasicInformation, object_basic_info, buffer_size, &bytes_needed);
-    if (status == STATUS_INFO_LENGTH_MISMATCH) {
-        printf("  Length needed to get HandleCount: %d\n", bytes_needed);
-    }
-    if (NT_ERROR(status)) {
-        printf("  HandleCount: <unknown>\n");
-    }
-    else {
-        printf("  HandleCount: %u\n", object_basic_info->HandleCount);
-    }
-#else
 #define ObjectNameInformation ((OBJECT_INFORMATION_CLASS)1)
     // Not on MSDN but listed at http://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FNT%20Objects%2FType%20independed%2FOBJECT_NAME_INFORMATION.html
     OBJECT_NAME_INFORMATION* object_name_info = (OBJECT_NAME_INFORMATION*)buffer;
@@ -172,56 +62,9 @@ void PrintLocalHandleInfo(HANDLE target_handle)
     }
     if (NT_ERROR(status)) {
         printf("  ObjectName: <unknown>\n");
-    }
-    else {
+    } else {
         printf("  ObjectName: %ls\n", object_name_info->NameBuffer);
     }
-#endif
-
-#if 0
-    /* Query the object type. */
-    PUBLIC_OBJECT_TYPE_INFORMATION* object_type_info = (PUBLIC_OBJECT_TYPE_INFORMATION*)buffer;
-    bytes_needed = 0;
-    status = NtQueryObject(target_handle, ObjectTypeInformation, object_type_info, buffer_size, &bytes_needed);
-    if (status == STATUS_INFO_LENGTH_MISMATCH) {
-        printf("  Length needed to get TypeName: %d\n", bytes_needed);
-    }
-    if (NT_ERROR(status)) {
-        printf("  TypeName: <unknown>\n");
-    }
-    else {
-        //printf("  TypeName: %ls\n", object_type_info->TypeName.Buffer);
-
-        if (wcscmp(object_type_info->TypeName.Buffer, L"File") == 0) {
-            printf("  TypeName: %ls\n", object_type_info->TypeName.Buffer);
-
-            // Get name of file from file handle.
-            FILE_NAME_INFO* fni = (FILE_NAME_INFO*)buffer;
-            if (!GetFileInformationByHandleEx(target_handle, FileNameInfo, fni, buffer_size)) {
-                ULONG error = GetLastError();
-                printf("  Name: <HResult %x>\n", HRESULT_FROM_WIN32(error));
-            }
-            else {
-                WCHAR path[MAX_PATH];
-                memcpy(path, fni->FileName, fni->FileNameLength);
-                path[fni->FileNameLength / sizeof(WCHAR)] = 0;
-                printf("  Name: %ls\n", path);
-            }
-        }
-    }
-
-    FILE_BASIC_INFO* fbi = (FILE_BASIC_INFO*)buffer;
-    if (!GetFileInformationByHandleEx(target_handle, FileBasicInfo, fbi, buffer_size)) {
-        ULONG error = GetLastError();
-        printf("  Name: <HResult %x>\n", HRESULT_FROM_WIN32(error));
-    }
-
-    FILE_STANDARD_INFO* fsi = (FILE_STANDARD_INFO*)buffer;
-    if (!GetFileInformationByHandleEx(target_handle, FileStandardInfo, fsi, buffer_size)) {
-        ULONG error = GetLastError();
-        printf("  Name: <HResult %x>\n", HRESULT_FROM_WIN32(error));
-    }
-#endif
     printf("\n");
 }
 
@@ -237,7 +80,6 @@ void PrintHandleInfo(HANDLE process_handle, HANDLE other_handle)
     PrintLocalHandleInfo(target_handle);
     CloseHandle(target_handle);
 }
-
 
 void PrintSystemHandles(void)
 {
@@ -258,11 +100,7 @@ void PrintSystemHandles(void)
         if (NT_SUCCESS(status)) {
             for (ULONG i = 0; i < handle_information->Count; i++) {
                 SYSTEM_HANDLE* system_handle = &handle_information->Handles[i];
-#if 1 // DEBUG
-                if (system_handle->ProcessId != 4432) {
-                    continue;
-                }
-#endif
+
                 HANDLE process_handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_DUP_HANDLE |
                     PROCESS_VM_READ,
                     FALSE, system_handle->ProcessId);
@@ -291,7 +129,6 @@ void PrintSystemHandles(void)
                 printf("  type: %d\n", system_handle->ObjectTypeNumber);
 
                 PrintHandleInfo(process_handle, other_handle);
-
 
                 /* Query eBPF for its type info. */
                 // We could use the QUERY_PROGRAM_INFO ioctl to get this. Or we could move this logic into kernel mode
@@ -371,10 +208,12 @@ void PrintProcessNameAndID(DWORD process_id)
 
 void TestDeviceHandle(void)
 {
-    ebpf_device_handle = initialize_device_handle();
-    PrintLocalHandleInfo(ebpf_device_handle);
-    CloseHandle(ebpf_device_handle);
-    ebpf_device_handle = INVALID_HANDLE_VALUE;
+#define EBPF_DEVICE_WIN32_NAME L"\\\\.\\EbpfIoDevice"
+    HANDLE hFile = CreateFile(
+            EBPF_DEVICE_WIN32_NAME, GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_FLAG_OVERLAPPED, 0);
+
+    PrintLocalHandleInfo(hFile);
+    CloseHandle(hFile);
 }
 
 void TestFileHandle(void)
@@ -388,8 +227,8 @@ void TestFileHandle(void)
 
 int main(int argc, char **argv)
 {
-    TestFileHandle();
-    TestDeviceHandle();
+    //TestFileHandle();
+    //TestDeviceHandle();
 
     ULONG process_id = 0;
     if (argc > 1) {
