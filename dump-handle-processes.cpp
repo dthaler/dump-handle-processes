@@ -482,6 +482,7 @@ void PrintHelp(void)
     printf("  -t         Run tests\n");
     printf("  -a         Print all process info\n");
     printf("  -e         Print all eBPF handles\n");
+    printf("  -f         Print all eBPF handles by reading system handles\n");
     printf("  -l         Print info for current process\n");
     printf("  -h <name>  Print info for all handles on a given name\n");
     printf("  -p <pid>   Print info for specified process ID\n");
@@ -497,10 +498,10 @@ int wmain(int argc, WCHAR **argv)
         if (wcscmp(argv[1], L"-a") == 0) {
             return PrintAllProcessInfo(nullptr);
         }
-        if (wcscmp(argv[1], L"-e") == 0) {
+        if (wcscmp(argv[1], L"-f") == 0) {
             return PrintSystemHandles(L"\\Device\\EbpfIoDevice", FILE_TYPE_CHAR);
         }
-        if (wcscmp(argv[1], L"-f") == 0) {
+        if (wcscmp(argv[1], L"-e") == 0) {
             return PrintAllProcessInfo(L"\\Device\\EbpfIoDevice");
         }
         if (wcscmp(argv[1], L"-l") == 0) {
