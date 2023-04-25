@@ -13,13 +13,14 @@
 #include <psapi.h>
 #include <processsnapshot.h>
 
-#define SystemHandleInformation ((SYSTEM_INFORMATION_CLASS)16)
-
+// Not on MSDN but listed at http://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FNT%20Objects%2FType%20independed%2FOBJECT_NAME_INFORMATION.html
+#define ObjectNameInformation ((OBJECT_INFORMATION_CLASS)1)
 typedef struct {
     UNICODE_STRING          Name;
     WCHAR                   NameBuffer[1];
 } OBJECT_NAME_INFORMATION;
 
+#define SystemHandleInformation ((SYSTEM_INFORMATION_CLASS)16)
 typedef struct
 {
     ULONG ProcessId;
@@ -36,13 +37,9 @@ typedef struct
     SYSTEM_HANDLE Handles[1];
 } SYSTEM_HANDLE_INFORMATION;
 
-void PrintLocalHandleInfo(HANDLE target_handle)
+void PrintLocalHandleInfo(DWORD process_id, HANDLE target_handle, const WCHAR* name, BYTE type)
 {
-    char buffer[1024];
-    ULONG buffer_size = sizeof(buffer);
-    ULONG bytes_needed;
-    NTSTATUS status;
-
+#if 0
     DWORD type = GetFileType(target_handle);
     if (type == FILE_TYPE_CHAR) {
         printf(" Device: ");
@@ -51,108 +48,88 @@ void PrintLocalHandleInfo(HANDLE target_handle)
     } else {
         printf(" Other: ");
     }
-
-#define ObjectNameInformation ((OBJECT_INFORMATION_CLASS)1)
-    // Not on MSDN but listed at http://undocumented.ntinternals.net/index.html?page=UserMode%2FUndocumented%20Functions%2FNT%20Objects%2FType%20independed%2FOBJECT_NAME_INFORMATION.html
-    OBJECT_NAME_INFORMATION* object_name_info = (OBJECT_NAME_INFORMATION*)buffer;
-    bytes_needed = 0;
-    status = NtQueryObject(target_handle, ObjectNameInformation, object_name_info, buffer_size, &bytes_needed);
-    if (status == STATUS_INFO_LENGTH_MISMATCH) {
-        printf("  Length needed to get HandleCount: %d\n", bytes_needed);
-    }
-    if (NT_ERROR(status)) {
-        printf("  ObjectName: <unknown>\n");
-    } else {
-        printf("  ObjectName: %ls\n", object_name_info->NameBuffer);
-    }
+#endif
+    printf("PID %d: Type %d  FileType %d  ObjectName: %ls\n", process_id, GetFileType(target_handle), type, name);
     printf("\n");
 }
 
-void PrintHandleInfo(HANDLE process_handle, HANDLE other_handle)
+// Print info on handle if we can get the name of the object it references.
+void PrintHandleInfo(HANDLE process_handle, HANDLE other_handle, BYTE type, _In_opt_ PCWSTR name_filter)
 {
     HANDLE target_handle;
     if (!DuplicateHandle(process_handle, other_handle, GetCurrentProcess(),
         &target_handle, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
-        printf("DuplicateHandle failed with error %d\n", GetLastError());
+        printf("PID %u DuplicateHandle failed with error %d\n", GetProcessId(process_handle), GetLastError());
         return;
     }
 
-    PrintLocalHandleInfo(target_handle);
+    char buffer[1024];
+    ULONG buffer_size = sizeof(buffer);
+    OBJECT_NAME_INFORMATION* object_name_info = (OBJECT_NAME_INFORMATION*)buffer;
+    ULONG bytes_needed = 0;
+    NTSTATUS status = NtQueryObject(target_handle, ObjectNameInformation, object_name_info, buffer_size, &bytes_needed);
+    if (NT_SUCCESS(status)) {
+        if (!name_filter || wcsstr(object_name_info->NameBuffer, name_filter) != nullptr) {
+            WCHAR name[1024];
+            memcpy(name, object_name_info->Name.Buffer, object_name_info->Name.Length);
+            name[object_name_info->Name.Length / sizeof(WCHAR)] = 0;
+            PrintLocalHandleInfo(GetProcessId(process_handle), target_handle, object_name_info->NameBuffer, type);
+        }
+    }
+
     CloseHandle(target_handle);
 }
 
-void PrintSystemHandles(void)
+int PrintSystemHandles(_In_opt_ PCWSTR name)
 {
     size_t shsize = sizeof(SYSTEM_HANDLE);
     ULONG bytes_needed = 0;
     ULONG handle_information_size = 32;
-    SYSTEM_HANDLE_INFORMATION* handle_information = (SYSTEM_HANDLE_INFORMATION*)malloc(handle_information_size);
-    NTSTATUS status = NtQuerySystemInformation(SystemHandleInformation, handle_information, handle_information_size, &bytes_needed);
-    if (status == STATUS_INFO_LENGTH_MISMATCH) {
-        free(handle_information);
-        handle_information_size = bytes_needed;
+    SYSTEM_HANDLE_INFORMATION* handle_information;
+    NTSTATUS status;
+
+    for (int iterations = 0; iterations < 64; iterations++) {
         handle_information = (SYSTEM_HANDLE_INFORMATION*)malloc(handle_information_size);
         if (handle_information == nullptr) {
             printf("Out of memory\n");
-            return;
+            return 1;
         }
         status = NtQuerySystemInformation(SystemHandleInformation, handle_information, handle_information_size, &bytes_needed);
-        if (NT_SUCCESS(status)) {
-            for (ULONG i = 0; i < handle_information->Count; i++) {
-                SYSTEM_HANDLE* system_handle = &handle_information->Handles[i];
-
-                HANDLE process_handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_DUP_HANDLE |
-                    PROCESS_VM_READ,
-                    FALSE, system_handle->ProcessId);
-                if (process_handle == nullptr) {
-                    continue;
-                }
-
-                HANDLE other_handle = (HANDLE)system_handle->Handle;
-#if 0
-                HANDLE target_handle;
-                if (!DuplicateHandle(
-                    process_handle,
-                    other_handle,
-                    GetCurrentProcess(),
-                    &target_handle,
-                    0,
-                    FALSE,
-                    DUPLICATE_SAME_ACCESS)) {
-                    printf("DuplicateHandle failed with error %d\n", GetLastError());
-                    CloseHandle(process_handle);
-                    continue;
-                }
-#endif
-
-                printf("PID %u: handle %p\n", system_handle->ProcessId, other_handle);
-                printf("  type: %d\n", system_handle->ObjectTypeNumber);
-
-                PrintHandleInfo(process_handle, other_handle);
-
-                /* Query eBPF for its type info. */
-                // We could use the QUERY_PROGRAM_INFO ioctl to get this. Or we could move this logic into kernel mode
-                // and avoid all the user-kernel transitions, which seems better.
-
-                CloseHandle(process_handle);
-            }
+        if (status != STATUS_INFO_LENGTH_MISMATCH) {
+            break;
         }
         free(handle_information);
+        handle_information_size = max(bytes_needed, handle_information_size * 2);
     }
+    if (NT_ERROR(status)) {
+        printf("Error %x from NtQuerySystemInformation\n", status);
+    } else {
+        for (ULONG i = 0; i < handle_information->Count; i++) {
+            SYSTEM_HANDLE* system_handle = &handle_information->Handles[i];
+
+            HANDLE process_handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, system_handle->ProcessId);
+            if (process_handle == nullptr) {
+                continue;
+            }
+
+            HANDLE other_handle = (HANDLE)system_handle->Handle;
+
+            PrintHandleInfo(process_handle, other_handle, system_handle->ObjectTypeNumber, name);
+
+            /* Query eBPF for its type info. */
+            // We could use the QUERY_PROGRAM_INFO ioctl to get this. Or we could move this logic into kernel mode
+            // and avoid all the user-kernel transitions, which seems better.
+
+            CloseHandle(process_handle);
+        }
+    }
+
+    free(handle_information);
+    return 0;
 }
 
-void PrintProcessHandles(HANDLE process_handle)
+void PrintProcessHandles(HANDLE process_handle, _In_opt_ PCWSTR name_filter)
 {
-    DWORD handle_count;
-    if (!GetProcessHandleCount(process_handle, &handle_count)) {
-        return;
-    }
-
-#if 0
-    PROCESS_HANDLE_INFORMATION handle_information;
-    NTSTATUS status = NtQueryInformationProcess(process_handle, ProcessHandleCount,
-#endif
-
     HPSS snapshot_handle = nullptr;
     // The following work but don't get handle information:
     //  PSS_CAPTURE_HANDLE_BASIC_INFORMATION
@@ -180,7 +157,7 @@ void PrintProcessHandles(HANDLE process_handle)
             if (result != ERROR_SUCCESS) {
                 break;
             }
-            PrintHandleInfo(process_handle, handle_entry.Handle);
+            PrintHandleInfo(process_handle, handle_entry.Handle, handle_entry.ObjectType, name_filter);
         }
 
         PssWalkMarkerFree(walk_marker_handle);
@@ -188,22 +165,23 @@ void PrintProcessHandles(HANDLE process_handle)
     PssFreeSnapshot(process_handle, snapshot_handle);
 }
 
-void PrintProcessNameAndID(DWORD process_id)
+int PrintProcessNameAndID(DWORD process_id)
 {
-    TCHAR process_name[MAX_PATH] = TEXT("<unknown>");
+    WCHAR process_name[MAX_PATH] = L"<unknown>";
 
     HANDLE process_handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, process_id);
-
     if (process_handle == nullptr) {
-        return;
+        printf("Couldn't open process %u\n", process_id);
+        return 1;
     }
 
     (void)GetModuleBaseName(process_handle, nullptr, process_name, sizeof(process_name) / sizeof(*process_name));
-    _tprintf(TEXT("%s  (PID: %u)\n"), process_name, process_id);
+    printf("PID %u: %ls\n", process_id, process_name);
 
-    PrintProcessHandles(process_handle);
+    PrintProcessHandles(process_handle, nullptr);
 
     CloseHandle(process_handle);
+    return 0;
 }
 
 void TestDeviceHandle(void)
@@ -211,35 +189,31 @@ void TestDeviceHandle(void)
 #define EBPF_DEVICE_WIN32_NAME L"\\\\.\\EbpfIoDevice"
     HANDLE hFile = CreateFile(
             EBPF_DEVICE_WIN32_NAME, GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_FLAG_OVERLAPPED, 0);
-
-    PrintLocalHandleInfo(hFile);
-    CloseHandle(hFile);
+    if (hFile) {
+        PrintLocalHandleInfo(GetCurrentProcessId(), hFile, EBPF_DEVICE_WIN32_NAME, 0);
+        CloseHandle(hFile);
+    }
 }
 
 void TestFileHandle(void)
 {
-    HANDLE hFile = CreateFileW(L"c:\\temp\\deleteme.txt", GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, 0, nullptr);
-
-    PrintLocalHandleInfo(hFile);
-
-    CloseHandle(hFile);
+    const WCHAR* filename = L"c:\\temp\\deleteme.txt";
+    HANDLE hFile = CreateFileW(filename, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (hFile) {
+        PrintLocalHandleInfo(GetCurrentProcessId(), hFile, filename, 0);
+        CloseHandle(hFile);
+    }
 }
 
-int main(int argc, char **argv)
+int RunTests(void)
 {
-    //TestFileHandle();
-    //TestDeviceHandle();
+    TestFileHandle();
+    TestDeviceHandle();
+    return 0;
+}
 
-    ULONG process_id = 0;
-    if (argc > 1) {
-        process_id = atoi(argv[1]);
-        if (!process_id) {
-            process_id = GetCurrentProcessId();
-        }
-        PrintProcessNameAndID(process_id);
-        return 0;
-    }
-    //PrintSystemHandles();
+int PrintAllProcessInfo(void)
+{
 
     DWORD max_processes = 512;
     DWORD bytes_used;
@@ -267,5 +241,45 @@ int main(int argc, char **argv)
     }
 
     delete[] processes;
+    return 0;
+}
+
+void PrintHelp(void)
+{
+    printf("Usage: dump-handle-processes <option>\n");
+    printf("Options:\n");
+    printf("  -t         Run tests\n");
+    printf("  -a         Print all process info\n");
+    printf("  -l         Print info for current process\n");
+    printf("  -h <name>  Print info for all handles on a given name\n");
+    printf("  -p <pid>   Print info for specified process ID\n");
+}
+
+int wmain(int argc, WCHAR **argv)
+{
+    ULONG process_id = 0;
+    if (argc > 1) {
+        if (wcscmp(argv[1], L"-t") == 0) {
+            return RunTests();
+        }
+        if (wcscmp(argv[1], L"-a") == 0) {
+            return PrintAllProcessInfo();
+        }
+        if (wcscmp(argv[1], L"-l") == 0) {
+            process_id = GetCurrentProcessId();
+            return PrintProcessNameAndID(process_id);
+        }
+        if (argc > 2 && wcscmp(argv[1], L"-p") == 0) {
+            process_id = _wtoi(argv[2]);
+            return PrintProcessNameAndID(process_id);
+        }
+        if (wcscmp(argv[1], L"-s") == 0) {
+            return PrintSystemHandles(nullptr);
+        }
+        if (argc > 2 && wcscmp(argv[1], L"-h") == 0) {
+            return PrintSystemHandles(argv[2]);
+        }
+    }
+    PrintHelp();
     return 0;
 }
