@@ -39,18 +39,20 @@ typedef struct
 
 void PrintLocalHandleInfo(DWORD process_id, HANDLE target_handle, const WCHAR* name, BYTE type)
 {
-#if 0
-    DWORD type = GetFileType(target_handle);
-    if (type == FILE_TYPE_CHAR) {
-        printf(" Device: ");
-    } else if (type == FILE_TYPE_DISK) {
-        printf(" File: ");
+    DWORD file_type = GetFileType(target_handle);
+    char buffer[80];
+    PCSTR type_string;
+    if (file_type == FILE_TYPE_CHAR) {
+        type_string = "Device";
+    } else if (file_type == FILE_TYPE_DISK) {
+        type_string = "File";
+    } else if (file_type == FILE_TYPE_PIPE) {
+        type_string = "Pipe";
     } else {
-        printf(" Other: ");
+        sprintf_s(buffer, sizeof(buffer), "%d", file_type);
+        type_string = buffer;
     }
-#endif
-    printf("PID %d: Type %d  FileType %d  ObjectName: %ls\n", process_id, GetFileType(target_handle), type, name);
-    printf("\n");
+    printf("PID %d: FileType %-6s  Type %2d  ObjectName: %ls\n", process_id, type_string, type, name);
 }
 
 // Print info on handle if we can get the name of the object it references.
@@ -59,7 +61,23 @@ void PrintHandleInfo(HANDLE process_handle, HANDLE other_handle, BYTE type, _In_
     HANDLE target_handle;
     if (!DuplicateHandle(process_handle, other_handle, GetCurrentProcess(),
         &target_handle, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
-        printf("PID %u DuplicateHandle failed with error %d\n", GetProcessId(process_handle), GetLastError());
+        ULONG error = GetLastError();
+        if (error == ERROR_NOT_SUPPORTED) {
+            // Some handle types cannot be duplicated. This is ok, since the handles
+            // we're looking for can be duplicated.
+            return;
+        }
+        if (error == ERROR_ACCESS_DENIED) {
+            // We can't duplicate handles in some system security processes. This is ok,
+            // we just can't detect whether they have handles open of the type we're looking for.
+            return;
+
+        }
+        if (error == ERROR_INVALID_HANDLE) {
+            // Handle is already invalidated.
+            return;
+        }
+        printf("PID %u DuplicateHandle failed with error %d\n", GetProcessId(process_handle), error);
         return;
     }
 
@@ -68,7 +86,7 @@ void PrintHandleInfo(HANDLE process_handle, HANDLE other_handle, BYTE type, _In_
     OBJECT_NAME_INFORMATION* object_name_info = (OBJECT_NAME_INFORMATION*)buffer;
     ULONG bytes_needed = 0;
     NTSTATUS status = NtQueryObject(target_handle, ObjectNameInformation, object_name_info, buffer_size, &bytes_needed);
-    if (NT_SUCCESS(status)) {
+    if (NT_SUCCESS(status) && (object_name_info->Name.Length > 0)) {
         if (!name_filter || wcsstr(object_name_info->NameBuffer, name_filter) != nullptr) {
             WCHAR name[1024];
             memcpy(name, object_name_info->Name.Buffer, object_name_info->Name.Length);
