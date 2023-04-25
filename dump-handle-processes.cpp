@@ -37,22 +37,49 @@ typedef struct
     SYSTEM_HANDLE Handles[1];
 } SYSTEM_HANDLE_INFORMATION;
 
-void PrintLocalHandleInfo(DWORD process_id, HANDLE target_handle, const WCHAR* name, BYTE type)
+void PrintLocalHandleInfo(DWORD process_id, HANDLE target_handle, const WCHAR* name, BYTE type, const WCHAR* type_name)
 {
     DWORD file_type = GetFileType(target_handle);
     char buffer[80];
     PCSTR type_string;
     if (file_type == FILE_TYPE_CHAR) {
-        type_string = "Device";
+        type_string = "Char";
     } else if (file_type == FILE_TYPE_DISK) {
-        type_string = "File";
+        type_string = "Disk";
     } else if (file_type == FILE_TYPE_PIPE) {
         type_string = "Pipe";
     } else {
         sprintf_s(buffer, sizeof(buffer), "%d", file_type);
         type_string = buffer;
     }
-    printf("PID %d: FileType %-6s  Type %2d  ObjectName: %ls\n", process_id, type_string, type, name);
+    printf("PID %d: FileType %-4s  Type %2d  TypeName %ls  ObjectName: %ls\n", process_id, type_string, type, type_name, name);
+}
+
+typedef struct {
+    PCWSTR name_filter;
+    HANDLE process_handle;
+    HANDLE target_handle;
+    PCWSTR type_name;
+    BYTE type;
+} query_name_param_t;
+
+DWORD WINAPI QueryNameThreadProc(_In_ PVOID parameter)
+{
+    query_name_param_t* param = (query_name_param_t*)parameter;
+    char buffer[1024];
+    ULONG buffer_size = sizeof(buffer);
+    NTSTATUS status;
+    OBJECT_NAME_INFORMATION* object_name_info = (OBJECT_NAME_INFORMATION*)buffer;
+    status = NtQueryObject(param->target_handle, ObjectNameInformation, object_name_info, buffer_size, nullptr);
+    if (NT_SUCCESS(status) && (object_name_info->Name.Length > 0)) {
+        if (!param->name_filter || wcsstr(object_name_info->NameBuffer, param->name_filter) != nullptr) {
+            WCHAR name[1024];
+            memcpy(name, object_name_info->Name.Buffer, object_name_info->Name.Length);
+            name[object_name_info->Name.Length / sizeof(WCHAR)] = 0;
+            PrintLocalHandleInfo(GetProcessId(param->process_handle), param->target_handle, object_name_info->NameBuffer, param->type, param->type_name);
+        }
+    }
+    return 0;
 }
 
 // Print info on handle if we can get the name of the object it references.
@@ -83,17 +110,28 @@ void PrintHandleInfo(HANDLE process_handle, HANDLE other_handle, BYTE type, _In_
 
     char buffer[1024];
     ULONG buffer_size = sizeof(buffer);
-    OBJECT_NAME_INFORMATION* object_name_info = (OBJECT_NAME_INFORMATION*)buffer;
+    NTSTATUS status;
+    PUBLIC_OBJECT_TYPE_INFORMATION object_type_info;
     ULONG bytes_needed = 0;
-    NTSTATUS status = NtQueryObject(target_handle, ObjectNameInformation, object_name_info, buffer_size, &bytes_needed);
-    if (NT_SUCCESS(status) && (object_name_info->Name.Length > 0)) {
-        if (!name_filter || wcsstr(object_name_info->NameBuffer, name_filter) != nullptr) {
-            WCHAR name[1024];
-            memcpy(name, object_name_info->Name.Buffer, object_name_info->Name.Length);
-            name[object_name_info->Name.Length / sizeof(WCHAR)] = 0;
-            PrintLocalHandleInfo(GetProcessId(process_handle), target_handle, object_name_info->NameBuffer, type);
-        }
+    status = NtQueryObject(target_handle, ObjectTypeInformation, buffer, buffer_size, &bytes_needed);
+    if (!NT_SUCCESS(status)) {
+        CloseHandle(target_handle);
+        return;
     }
+    memcpy(&object_type_info, buffer, sizeof(object_type_info));
+
+    // Set a 200ms timeout for querying object name after which we just give up.
+    query_name_param_t param;
+    param.name_filter = name_filter;
+    param.process_handle = process_handle;
+    param.target_handle = target_handle;
+    param.type = type;
+    param.type_name = object_type_info.TypeName.Buffer;
+    HANDLE thread = CreateThread(nullptr, 0, QueryNameThreadProc, &param, 0, nullptr);
+    if (WaitForSingleObject(thread, 200) == WAIT_TIMEOUT) {
+        TerminateThread(thread, 1);
+    }
+    CloseHandle(thread);
 
     CloseHandle(target_handle);
 }
@@ -202,13 +240,14 @@ int PrintProcessNameAndID(DWORD process_id)
     return 0;
 }
 
+// TODO: delete these
 void TestDeviceHandle(void)
 {
 #define EBPF_DEVICE_WIN32_NAME L"\\\\.\\EbpfIoDevice"
     HANDLE hFile = CreateFile(
             EBPF_DEVICE_WIN32_NAME, GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_FLAG_OVERLAPPED, 0);
     if (hFile) {
-        PrintLocalHandleInfo(GetCurrentProcessId(), hFile, EBPF_DEVICE_WIN32_NAME, 0);
+        PrintLocalHandleInfo(GetCurrentProcessId(), hFile, EBPF_DEVICE_WIN32_NAME, 0, L"test");
         CloseHandle(hFile);
     }
 }
@@ -218,7 +257,7 @@ void TestFileHandle(void)
     const WCHAR* filename = L"c:\\temp\\deleteme.txt";
     HANDLE hFile = CreateFileW(filename, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, 0, nullptr);
     if (hFile) {
-        PrintLocalHandleInfo(GetCurrentProcessId(), hFile, filename, 0);
+        PrintLocalHandleInfo(GetCurrentProcessId(), hFile, filename, 0, L"test");
         CloseHandle(hFile);
     }
 }
@@ -232,7 +271,6 @@ int RunTests(void)
 
 int PrintAllProcessInfo(void)
 {
-
     DWORD max_processes = 512;
     DWORD bytes_used;
     DWORD* processes = nullptr;
